@@ -16,7 +16,10 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 (If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
 """
 
+import matplotlib.pyplot as plt
+
 import os
+import sys
 import time
 import math
 import pickle
@@ -28,6 +31,22 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
+
+if len(sys.argv) < 2:
+    print("Error: No config file specified.\nUsage: python train.py <config-file>")
+    sys.exit(1)
+
+config_file = sys.argv[1]
+
+if not os.path.exists(config_file):
+    print(f"Error: Config file '{config_file}' not found.")
+    sys.exit(1)
+
+print(f"Using configuration file: {config_file}")
+
+# Tracking Loss
+loss_history = []
+start_time = time.time()
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -325,6 +344,7 @@ while True:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        loss_history.append(lossf)
     iter_num += 1
     local_iter_num += 1
 
@@ -334,3 +354,50 @@ while True:
 
 if ddp:
     destroy_process_group()
+
+end_time = time.time()
+training_time = end_time - start_time
+def format_time(seconds):
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+training_time_str = format_time(training_time)
+
+# Plot raw loss
+plt.figure(figsize=(8,5))
+plt.plot(loss_history, label="Training Loss")
+
+# Optional: smoothed loss using moving average
+import numpy as np
+window = 50
+if len(loss_history) >= window:
+    smoothed_loss = np.convolve(loss_history, np.ones(window)/window, mode='valid')
+    plt.plot(smoothed_loss, label=f"Smoothed Loss ({window} steps)")
+
+plt.xlabel("Iteration")
+plt.ylabel("Loss")
+plt.title("Loss Convergence")
+
+params_text = (
+    f"block_size={block_size}\n"
+    f"batch_size={batch_size}\n"
+    f"grad_accum={gradient_accumulation_steps}\n"
+    f"n_layer={n_layer}, n_head={n_head}, n_embd={n_embd}\n"
+    f"time={training_time_str}"
+)
+
+plt.gca().text(
+    0.98, 0.95, params_text,
+    transform=plt.gca().transAxes,
+    fontsize=9,
+    verticalalignment='top',
+    horizontalalignment='right',
+    bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5)
+)
+
+plt.legend()
+plt.grid(True)
+
+filename = f"loss_bs{block_size}_b{batch_size}_nl{n_layer}_nh{n_head}_ne{n_embd}.png"
+plt.savefig(filename, dpi=300)
